@@ -1,13 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    fs,
+    sync::{Arc, RwLock},
 };
 
 use anyhow::Result;
-use ap_rs::protocol::HintData;
 use rand::{seq::IteratorRandom, thread_rng};
 use serde::{Deserialize, Serialize};
-use tokio::{fs, sync::RwLock};
 
 use crate::utils::get_region_from_loc_id;
 
@@ -15,67 +14,66 @@ use super::{
     chest::Chest,
     lib::{ArchipelaPalSlotData, LocationID, RegionID, SAVE_FILE_DIRECTORY},
     offsets::CHEST_OFFSET,
-    player::Player,
+    player::PlayerState,
     save_file::SaveFile,
 };
 
 #[derive(Debug, Default)]
 pub struct FullGameState {
-    pub player: Arc<RwLock<Player>>,
+    pub player: Arc<RwLock<PlayerState>>,
     pub map: Arc<RwLock<GameMap>>,
     pub seed_name: String,
-    pub team: i32,
-    pub last_checked_idx: Arc<RwLock<i32>>,
-    pub slot_id: i32,
-    /// A queue of hints that we are currently searching for in OUR world
-    pub source_hint_queue: Arc<RwLock<HashSet<HintData>>>,
+    pub team: u32,
+    pub last_checked_idx: Arc<RwLock<usize>>,
+    pub slot_id: u32,
+    // /// A queue of hints that we are currently searching for in OUR world
+    // pub source_hint_queue: Arc<RwLock<HashSet<HintData>>>,
 }
 
 impl FullGameState {
     /// Returns a checked location's ID, if we check one
-    pub async fn tick_game_state(&self) -> Option<LocationID> {
-        let player = self.player.read().await;
+    pub fn tick_game_state(&self) -> Option<LocationID> {
+        let player = self.player.read().unwrap();
         let player_region_keys = player.get_accessible_regions();
         log::debug!("Region keys: {:?}", player_region_keys);
 
-        // Check if we can get something from the hint list first
-        let source_hint_queue = self.source_hint_queue.read().await;
-        let hint_item = source_hint_queue.iter().find_map(|hint| {
-            if hint.item.player != self.slot_id {
-                log::warn!(
-                    "Hint from another player in source hint queue! This is a bug! Ignoring."
-                );
-                return None;
-            }
+        // // Check if we can get something from the hint list first
+        // let hint_item = self.source_hint_queue.read().await.iter().find_map(|hint| {
+        //     if hint.item.player != self.slot_id {
+        //         log::warn!(
+        //             "Hint from another player in source hint queue! This is a bug! Ignoring."
+        //         );
+        //         return None;
+        //     }
 
-            let loc_id = hint.item.location;
-            let region = get_region_from_loc_id(loc_id as u32);
-            if player_region_keys.contains(&region) {
-                return Some(hint.item.location);
-            }
+        //     let loc_id = hint.item.location;
+        //     let region = get_region_from_loc_id(loc_id as u32);
+        //     if player_region_keys.contains(&region) {
+        //         return Some(hint.item.location);
+        //     }
 
-            None
-        });
+        //     None
+        // });
 
-        if let Some(hint_loc) = hint_item {
-            let region = get_region_from_loc_id(hint_loc as u32);
-            let mut map = self.map.write().await;
-            let chest = map
-                .map
-                .get_mut(&region)
-                .and_then(|chests| {
-                    chests
-                        .iter_mut()
-                        .find(|chest| chest.full_id == hint_loc as LocationID)
-                })
-                .unwrap_or_else(|| panic!("Chest {hint_loc} should exist in game map"));
-            if !chest.checked {
-                chest.checked = true;
-                return Some(hint_loc as LocationID);
-            }
-        }
+        // if let Some(hint_loc) = hint_item {
+        //     let region = get_region_from_loc_id(hint_loc as u32);
+        //     let mut map = self.map.write().unwrap();
+        //     let chest = map
+        //         .map
+        //         .get_mut(&region)
+        //         .and_then(|chests| {
+        //             chests
+        //                 .iter_mut()
+        //                 .find(|chest| chest.full_id == hint_loc as LocationID)
+        //         })
+        //         .unwrap_or_else(|| panic!("Chest {hint_loc} should exist in game map"));
+        //     if !chest.checked {
+        //         chest.checked = true;
+        //         return Some(hint_loc as LocationID);
+        //     }
+        // }
 
-        let map = self.map.read().await;
+        let map = self.map.read().unwrap();
         let search_region = player.currently_exploring_region;
         let initial_chest = Self::choose_chest_in_region(&map, &search_region);
 
@@ -103,11 +101,11 @@ impl FullGameState {
 
         let chosen_check = if let Some((chosen_region, chosen_chest_idx)) = mapped_chest_options {
             if chosen_region != search_region {
-                let mut player = self.player.write().await;
+                let mut player = self.player.write().unwrap();
                 player.currently_exploring_region = chosen_region;
             }
 
-            let mut map = self.map.write().await;
+            let mut map = self.map.write().unwrap();
             let chest = map
                 .map
                 .get_mut(&chosen_region)
@@ -125,7 +123,6 @@ impl FullGameState {
         };
 
         self.write_save_file()
-            .await
             .inspect_err(|e| {
                 log::error!("Error saving file: {e}");
             })
@@ -150,11 +147,11 @@ impl FullGameState {
             .choose(&mut rng)
     }
 
-    pub async fn write_save_file(&self) -> Result<()> {
-        let player_copy = self.player.read().await.clone();
-        let map_copy = self.map.read().await.clone();
-        let last_checked_idx = *self.last_checked_idx.read().await;
-        let source_hint_queue = self.source_hint_queue.read().await.clone();
+    pub fn write_save_file(&self) -> Result<()> {
+        let player_copy = self.player.read().unwrap().clone();
+        let map_copy = self.map.read().unwrap().clone();
+        let last_checked_idx = *self.last_checked_idx.read().unwrap();
+        // let source_hint_queue = self.source_hint_queue.read().await.clone();
 
         let save_file = SaveFile {
             player: player_copy,
@@ -163,13 +160,13 @@ impl FullGameState {
             team: self.team,
             last_checked_idx,
             slot_id: self.slot_id,
-            source_hint_queue,
+            // source_hint_queue,
         };
 
         let savefile_json = serde_json::to_string(&save_file)?;
 
         let save_path = Self::make_save_file_name(&self.seed_name);
-        fs::write(save_path, savefile_json).await?;
+        fs::write(save_path, savefile_json)?;
 
         Ok(())
     }
@@ -187,7 +184,7 @@ impl FullGameState {
         format!("{SAVE_FILE_DIRECTORY}/save-file-{seed_name}.json")
     }
 
-    pub fn make_hints_get_key(&self, slot_id: i32) -> String {
+    pub fn make_hints_get_key(&self, slot_id: u32) -> String {
         let team = self.team;
         format!("_read_hints_{team}_{slot_id}")
     }

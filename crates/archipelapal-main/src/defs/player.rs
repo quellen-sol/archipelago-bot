@@ -11,7 +11,7 @@ use super::{
 pub const SPEED_BOOST_MODIFIER_PCT: f32 = 0.01;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Player {
+pub struct PlayerState {
     /// K = ItemID, V = qty
     pub inventory: HashMap<ItemID, u16>,
     // pub checked_locations: HashSet<LocationID>,
@@ -19,7 +19,7 @@ pub struct Player {
     pub speed_modifier: f32,
 }
 
-impl Default for Player {
+impl Default for PlayerState {
     fn default() -> Self {
         Self {
             inventory: HashMap::new(),
@@ -29,7 +29,7 @@ impl Default for Player {
     }
 }
 
-impl Player {
+impl PlayerState {
     pub fn get_accessible_regions(&self) -> Vec<RegionID> {
         self.inventory
             .iter()

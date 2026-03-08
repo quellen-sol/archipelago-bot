@@ -1,6 +1,3 @@
-[submodule "crates/archipelago_rs"]
-	path = crates/archipelago_rs
-	url = git@github.com:quellen-sol/archipelago_rs.git
 [submodule "world/Archipelago"]
 	path = world/Archipelago
 	url = git@github.com:quellen-sol/Archipelago.git

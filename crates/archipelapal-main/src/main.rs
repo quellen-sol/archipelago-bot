@@ -2,15 +2,17 @@ use std::{
     fs,
     io::{stdin, stdout, Write},
     sync::Arc,
+    thread,
+    time::Duration,
     vec,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use ap_rs::{client::ArchipelagoClient, protocol::Get};
+use ap_rs::{Client, ConnectionOptions, ItemHandling};
 use clap::Parser;
 use defs::{
     game_state::{FullGameState, GameMap},
-    lib::{ArchipelaPalSlotData, GoalOneShotData, SAVE_FILE_DIRECTORY},
+    lib::{ArchipelaPalSlotData, SAVE_FILE_DIRECTORY},
     user_settings::UserSettings,
 };
 use processes::{
@@ -42,7 +44,7 @@ pub const ITEM_HANDLING: i32 = 0b111;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let main_result = outer_main().await;
+    let main_result = inner_main().await;
 
     match main_result {
         Ok(_) => Ok(()),
@@ -57,7 +59,7 @@ async fn main() -> Result<()> {
 
 // This is our primary `main` function, but to allow for easy error handling and logging, we have
 // the actual main function call this one.
-async fn outer_main() -> Result<()> {
+async fn inner_main() -> Result<()> {
     dotenvy::dotenv().ok();
     env_logger::init();
 
@@ -110,76 +112,77 @@ async fn outer_main() -> Result<()> {
         .save()
         .context("Could not save user settings")?;
 
-    let mut client = ArchipelagoClient::new(&addr).await?;
+    let mut conn = ap_rs::Connection::<ArchipelaPalSlotData>::new(
+        &addr,
+        &slot_name,
+        Some(GAME_NAME),
+        ConnectionOptions::new()
+            .password(password)
+            .receive_items(ItemHandling::OtherWorlds {
+                own_world: true,
+                starting_inventory: true,
+            }),
+    );
 
-    let connected_packet = client
-        .connect(
-            GAME_NAME,
-            &slot_name,
-            Some(&password),
-            Some(ITEM_HANDLING), // ?
-            vec!["AP".into(), "Pal".into()],
-            true,
-        )
-        .await?;
+    while !conn.is_connected() {
+        thread::sleep(Duration::from_secs(1));
+        log::info!("Waiting for connection to AP server...");
+    }
+    let (config, seed_name, team, slot_id, release_perms) = {
+        let client_new = conn.client_mut().context("no Client?")?;
+        let release_perms = client_new.release_permission();
+        let config = client_new.slot_data().clone();
+        let seed_name = client_new.seed_name().to_string();
+        let player = client_new.this_player();
+        let team = player.team();
+        let slot_id = player.slot();
 
-    let config = serde_json::from_value::<ArchipelaPalSlotData>(connected_packet.slot_data)
-        .context("Could not parse slot_data??")?;
+        client_new
+            .get([format!("_read_client_status_{team}_{slot_id}")])
+            .await;
+        client_new.sync()?;
+
+        (config, seed_name, team, slot_id, release_perms)
+    };
+
+    let conn_arc = Arc::new(conn);
 
     log::debug!("Config: {config:?}");
 
     log::info!("Connected");
 
-    let info = client.room_info();
-    log::info!("Seed: {}", info.seed_name);
+    log::info!("Seed: {}", seed_name);
 
     // Make 'Saves' directory if it doesn't exist
     fs::create_dir_all(SAVE_FILE_DIRECTORY).context("Could not create 'Saves' directory")?;
 
-    let mut game_state = FullGameState::from_file_or_default(&info.seed_name);
-
-    let slot_id = connected_packet.slot;
-    let team = connected_packet.team;
+    let mut game_state = FullGameState::from_file_or_default(&seed_name);
 
     // Correct the game state if it ended up being a default
     if game_state.seed_name.is_empty() {
         let game_map = GameMap::new_from_config(&config);
 
-        let mut map_lock = game_state.map.write().await;
+        let mut map_lock = game_state.map.write().unwrap();
         *map_lock = game_map;
         drop(map_lock);
 
         // GAME STATE FIRST TIME CREATION
-        game_state.seed_name = info.seed_name.clone();
+        game_state.seed_name = seed_name.to_string();
         game_state.team = team;
         game_state.slot_id = slot_id;
     }
 
     let game_state = Arc::new(game_state);
 
-    let (mut client_sender, client_receiver) = client.split();
-
-    let (goal_tx, goal_rx) = oneshot::channel::<GoalOneShotData>();
+    let (goal_tx, goal_rx) = oneshot::channel::<()>();
 
     // Spawn server listen thread
-    let server_handle =
-        spawn_ap_server_task(game_state.clone(), client_receiver, config.clone(), goal_tx);
-
-    // Task started, slight delay, then send syncing packets
-    client_sender
-        .send(ap_rs::protocol::ClientMessage::Get(Get {
-            keys: vec![
-                format!("_read_client_status_{team}_{slot_id}"),
-                game_state.make_hints_get_key(slot_id),
-            ],
-        }))
-        .await
-        .context("Failed to get my status!")?;
-
-    client_sender
-        .send(ap_rs::protocol::ClientMessage::Sync)
-        .await
-        .context("Could not send sync packet!")?;
+    let server_handle = spawn_ap_server_task(
+        game_state.clone(),
+        conn_arc.clone(),
+        config.clone(),
+        goal_tx,
+    );
 
     if !args.skip_start_confirmation {
         // Prompt user to start game "press enter to start"
@@ -187,13 +190,13 @@ async fn outer_main() -> Result<()> {
         get_user_input(&start_prompt)?;
     }
 
-    let game_handle =
-        spawn_game_playing_task(game_state.clone(), client_sender, config.clone(), goal_rx);
-
-    let (sh_joined, gh_joined) = tokio::join!(server_handle, game_handle);
-
-    sh_joined?;
-    gh_joined?;
+    let game_handle = spawn_game_playing_task(
+        game_state.clone(),
+        conn_arc,
+        config.clone(),
+        goal_rx,
+        release_perms,
+    );
 
     Ok(())
 }

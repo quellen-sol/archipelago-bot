@@ -1,4 +1,3 @@
-use ap_rs::protocol::RoomInfo;
 use serde::{Deserialize, Serialize};
 
 pub const SAVE_FILE_DIRECTORY: &str = "Saves";
@@ -6,12 +5,6 @@ pub const SAVE_FILE_DIRECTORY: &str = "Saves";
 pub type RegionID = u8;
 pub type LocationID = u32;
 pub type ItemID = u32;
-pub type GoalOneShotData = GoalData;
-
-#[derive(Debug)]
-pub struct GoalData {
-    pub room_info: RoomInfo,
-}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ArchipelaPalSlotData {
